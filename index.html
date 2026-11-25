@@ -1,0 +1,45 @@
+<!doctype html>
+<html lang="ru">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+<title>Поиск батрачки</title>
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=Golos+Text:wght@400;500;600;700&family=Unbounded:wght@500;700&family=JetBrains+Mono:wght@400;600&display=swap">
+<link rel="stylesheet" href="style.css">
+</head>
+<body>
+<header class="top">
+  <button class="menu-btn" id="menuBtn" aria-label="Открыть программу">☰</button>
+  <a class="brand" href="#home">Поиск <span>батрачки</span></a>
+  <nav class="top-links"><a href="#home" id="lnkHome">Треки</a><a href="#data" id="lnkData">Данные и песочница</a><a href="#rating" id="lnkRating">Рейтинг</a></nav>
+  <div class="top-progress"><span id="progTxt"></span><div class="bar"><i id="progBar"></i></div></div>
+  <div class="user-chip" id="userChip"></div>
+</header>
+<div class="wrap" id="wrap">
+  <aside class="side" id="side"></aside>
+  <main><div class="page" id="view"><div class="loading-box">Загружаю…</div></div></main>
+</div>
+<div id="authRoot" hidden></div>
+
+<script src="config.js"></script>
+<script src="https://cdnjs.cloudflare.com/ajax/libs/sql.js/1.10.3/sql-asm.js"></script>
+<script>
+window.COURSE = { mods: {}, add(m) { this.mods[m.id] = m; } };
+const md = String.raw;
+</script>
+<script src="data.js"></script>
+<script src="gen.js"></script>
+<script src="c-python.js"></script>
+<script src="c-python2.js"></script>
+<script src="c-sql.js"></script>
+<script src="c-stats.js"></script>
+<script src="c-product.js"></script>
+<script src="c-ml.js"></script>
+<script src="c-drills.js"></script>
+<script src="c-mltrack.js"></script>
+<script src="c-ins.js"></script>
+<script src="tracks.js"></script>
+<script src="app.js"></script>
+</body>
+</html>
