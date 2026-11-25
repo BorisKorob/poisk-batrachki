@@ -10,13 +10,13 @@
 
 ## Запуск
 - Локально: открыть `index.html` или запустить `.claude\serve.ps1` и открыть http://localhost:8765/.
-- В интернете с аккаунтами: см. [SETUP.md](SETUP.md) (GitHub Pages + Appwrite).
+- В интернете с аккаунтами: см. [SETUP.md](SETUP.md) (GitHub Pages + Firebase).
 
 ## Структура
 | Файл | Что внутри |
 |---|---|
-| `index.html`, `style.css`, `app.js` | оболочка, проверка задач, вход через Appwrite, рейтинг |
-| `config.js` | настройки Appwrite (пустой projectId — без аккаунтов) |
+| `index.html`, `style.css`, `app.js` | оболочка, проверка задач, вход через Firebase, рейтинг |
+| `config.js` | настройки Firebase (`null` — без аккаунтов) |
 | `data.js` | синтетические данные: сервис доставки «Корзинка» и страховая «Надёжный полис» |
 | `gen.js` | генераторы вариантов задач и статистические функции |
 | `tracks.js` | состав треков |
