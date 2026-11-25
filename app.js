@@ -25,98 +25,156 @@ let track = TR.find((t) => t.id === ls.get('pb-track', 'da')) || TR[0];
 const modNum = (m, tr = track) => tr.modules.indexOf(m.id) + 1;
 
 /* ================= хранилище прогресса ================= */
+// Прогресс аккаунта хранится одной строкой таблицы Appwrite: rowId = id пользователя,
+// solved — список ключей решённых задач через запятую, count — их число (для рейтинга).
 const Store = {
-  mode: 'local', uid: null, name: '', ref: null, solved: {}, code: {},
+  mode: 'local', uid: null, name: '', solved: {}, code: {}, _saving: false, _dirty: false,
   init() { this.solved = ls.get('pb-solved-local', {}); this.code = ls.get('pb-code-local', {}); },
-  async attach(user, fs) {
-    this.mode = 'firebase'; this.uid = user.uid; this.name = user.displayName || user.email.split('@')[0];
-    this.ref = fs.collection('users').doc(user.uid);
-    const snap = await this.ref.get();
-    this.solved = snap.exists ? snap.data().solved || {} : {};
-    if (!snap.exists || snap.data().name !== this.name) await this.ref.set({ name: this.name, solved: this.solved, count: Object.keys(this.solved).length }, { merge: true });
+  async attach(user) {
+    this.mode = 'cloud'; this.uid = user.$id; this.name = user.name || user.email.split('@')[0];
+    this.solved = {};
+    try {
+      const row = await AW.db.getRow({ databaseId: AW.cfg.databaseId, tableId: AW.cfg.tableId, rowId: this.uid });
+      String(row.solved || '').split(',').filter(Boolean).forEach((k) => (this.solved[k] = 1));
+      if (row.name !== this.name) this.push();
+    } catch (e) {
+      if (e && e.code === 404) await this.push(); else throw e;
+    }
     this.code = ls.get('pb-code-' + this.uid, {});
   },
-  detach() { this.mode = 'local'; this.uid = null; this.ref = null; this.init(); },
+  detach() { this.mode = 'local'; this.uid = null; this.init(); },
+  async push() {
+    if (this._saving) { this._dirty = true; return; }
+    this._saving = true;
+    try {
+      const { Permission, Role } = window.Appwrite;
+      const keys = Object.keys(this.solved);
+      await AW.db.upsertRow({
+        databaseId: AW.cfg.databaseId, tableId: AW.cfg.tableId, rowId: this.uid,
+        data: { name: this.name, count: keys.length, solved: keys.join(',') },
+        permissions: [Permission.read(Role.users()), Permission.update(Role.user(this.uid)), Permission.delete(Role.user(this.uid))],
+      });
+    } catch (e) { toast('Не удалось сохранить прогресс в облаке: ' + authMsg(e)); }
+    finally {
+      this._saving = false;
+      if (this._dirty) { this._dirty = false; this.push(); }
+    }
+  },
   markSolved(key) {
     if (this.solved[key]) return;
     this.solved[key] = Date.now();
-    if (this.mode === 'firebase') {
-      this.ref.set({ solved: { [key]: this.solved[key] }, count: Object.keys(this.solved).length, updated: Date.now() }, { merge: true })
-        .catch(() => toast('Не удалось сохранить прогресс в облаке. Проверьте интернет.'));
-    } else ls.set('pb-solved-local', this.solved);
+    if (this.mode === 'cloud') this.push(); else ls.set('pb-solved-local', this.solved);
   },
   _t: null,
   saveCode(key, code) {
     if (code == null) delete this.code[key]; else this.code[key] = code;
-    clearTimeout(this._t); this._t = setTimeout(() => ls.set(this.mode === 'firebase' ? 'pb-code-' + this.uid : 'pb-code-local', this.code), 400);
+    clearTimeout(this._t); this._t = setTimeout(() => ls.set(this.mode === 'cloud' ? 'pb-code-' + this.uid : 'pb-code-local', this.code), 400);
   },
 };
 Store.init();
 const solvedIn = (arr) => arr.filter((t) => Store.solved[t.key]).length;
 
-/* ================= Firebase ================= */
-let FB = null;
-const FB_V = 'https://www.gstatic.com/firebasejs/10.12.2/';
-const AUTH_ERR = {
-  'auth/invalid-email': 'Неверный формат почты.', 'auth/user-not-found': 'Такой пользователь не найден.', 'auth/wrong-password': 'Неверный пароль.',
-  'auth/invalid-credential': 'Неверная почта или пароль.', 'auth/email-already-in-use': 'Эта почта уже зарегистрирована. Войдите.',
-  'auth/weak-password': 'Пароль слишком простой: нужно минимум 6 символов.', 'auth/too-many-requests': 'Слишком много попыток. Подождите пару минут.',
-  'auth/network-request-failed': 'Нет связи с сервером. Проверьте интернет.', 'auth/missing-password': 'Введите пароль.',
-};
-async function initFirebase() {
-  await loadScript(FB_V + 'firebase-app-compat.js');
-  await Promise.all([loadScript(FB_V + 'firebase-auth-compat.js'), loadScript(FB_V + 'firebase-firestore-compat.js')]);
-  firebase.initializeApp(window.FIREBASE_CONFIG);
-  FB = { auth: firebase.auth(), fs: firebase.firestore() };
-  FB.auth.onAuthStateChanged(async (u) => {
-    if (u) {
-      try { await Store.attach(u, FB.fs); } catch (e) { toast('Не удалось загрузить прогресс: ' + (e.message || e)); }
-      showApp(); route();
-    } else if (!ls.get('pb-guest', false)) { Store.detach(); showAuth(); }
-    else { Store.detach(); showApp(); route(); }
-  });
+/* ================= аккаунты (Appwrite) ================= */
+let AW = null;
+const AW_SDK = 'https://cdn.jsdelivr.net/npm/appwrite@29.2.0/dist/iife/sdk.js';
+function authMsg(e) {
+  const t = (e && (e.type || '')) || '', m = (e && e.message) || String(e);
+  if (/user_already_exists/.test(t)) return 'Эта почта уже зарегистрирована. Войдите.';
+  if (/user_invalid_credentials|user_not_found/.test(t)) return 'Неверная почта или пароль.';
+  if (/password/.test(t) && /(short|invalid|weak|recently|personal)/.test(t + m)) return 'Пароль не подходит: нужно минимум 8 символов, и он не должен быть слишком простым.';
+  if (/general_argument_invalid|email/.test(t) && /mail/i.test(m)) return 'Неверный формат почты.';
+  if (/rate_limit|429/.test(t + (e && e.code))) return 'Слишком много попыток. Подождите пару минут.';
+  if (/user_session_already_exists/.test(t)) return 'Вы уже вошли. Обновите страницу.';
+  if (/Failed to fetch|NetworkError|network/i.test(m)) return 'Нет связи с сервером. Проверьте интернет.';
+  if (/project_not_found|general_unknown_origin|platform/i.test(t + m)) return 'Сервер аккаунтов не настроен для этого сайта (проверьте Web-платформу в Appwrite).';
+  if (/not authorized|unauthorized/i.test(t + m)) return 'Нет доступа к таблице прогресса (проверьте права таблицы в Appwrite).';
+  return m;
+}
+async function initCloud() {
+  await loadScript(AW_SDK);
+  const { Client, Account, TablesDB } = window.Appwrite;
+  const cfg = window.APPWRITE_CONFIG;
+  const client = new Client().setEndpoint(cfg.endpoint).setProject(cfg.projectId);
+  AW = { cfg, client, account: new Account(client), db: new TablesDB(client) };
+  const q = new URLSearchParams(location.search);
+  if (q.get('userId') && q.get('secret')) { showReset(q.get('userId'), q.get('secret')); return; }
+  await refreshSession();
+}
+async function refreshSession() {
+  let user = null;
+  try { user = await AW.account.get(); } catch (e) { user = null; }
+  if (user) {
+    try { await Store.attach(user); } catch (e) { toast('Не удалось загрузить прогресс: ' + authMsg(e)); }
+    showApp(); route();
+  } else if (!ls.get('pb-guest', false)) { Store.detach(); showAuth(); }
+  else { Store.detach(); showApp(); route(); }
 }
 function showApp() { $('#authRoot').hidden = true; $('#wrap').hidden = false; document.querySelector('.top').hidden = false; renderUserChip(); }
 function renderUserChip() {
   const c = $('#userChip');
-  if (!FB) { c.innerHTML = ''; return; }
-  if (Store.mode === 'firebase') { c.innerHTML = `<b></b><button class="link-btn" id="logout">Выйти</button>`; c.querySelector('b').textContent = Store.name; $('#logout').onclick = () => { ls.set('pb-guest', false); FB.auth.signOut(); }; }
-  else { c.innerHTML = `<button class="link-btn" id="login">Войти</button>`; $('#login').onclick = () => { ls.set('pb-guest', false); showAuth(); }; }
+  if (!AW) { c.innerHTML = ''; return; }
+  if (Store.mode === 'cloud') {
+    c.innerHTML = `<b></b><button class="link-btn" id="logout">Выйти</button>`; c.querySelector('b').textContent = Store.name;
+    $('#logout').onclick = async () => { ls.set('pb-guest', false); try { await AW.account.deleteSession({ sessionId: 'current' }); } catch (e) {} Store.detach(); showAuth(); };
+  } else { c.innerHTML = `<button class="link-btn" id="login">Войти</button>`; $('#login').onclick = () => { ls.set('pb-guest', false); showAuth(); }; }
 }
-function showAuth() {
+function authShell(inner) {
   $('#wrap').hidden = true; document.querySelector('.top').hidden = true;
   const r = $('#authRoot'); r.hidden = false;
+  r.innerHTML = `<div class="auth-wrap"><form class="auth" id="authForm" novalidate><h1>Поиск <span style="color:var(--accent)">батрачки</span></h1>${inner}</form></div>`;
+  return r;
+}
+function showAuth() {
   let mode = 'in';
   const draw = (msg, cls) => {
-    r.innerHTML = `<div class="auth-wrap"><form class="auth" id="authForm" novalidate>
-      <h1>Поиск <span style="color:var(--accent)">батрачки</span></h1>
+    authShell(`
       <p>Тренажёр для аналитиков данных, ML-специалистов и аналитиков страховых компаний. Войдите, чтобы прогресс сохранялся в вашем аккаунте.</p>
       <div class="tabs"><button type="button" data-m="in" class="${mode === 'in' ? 'on' : ''}">Вход</button><button type="button" data-m="up" class="${mode === 'up' ? 'on' : ''}">Регистрация</button></div>
       ${mode === 'up' ? '<label>Имя в рейтинге<input id="aName" autocomplete="nickname" maxlength="40" required></label>' : ''}
       <label>Почта<input id="aEmail" type="email" autocomplete="email" required></label>
-      <label>Пароль<input id="aPass" type="password" autocomplete="${mode === 'up' ? 'new-password' : 'current-password'}" minlength="6" required></label>
+      <label>Пароль${mode === 'up' ? ' (минимум 8 символов)' : ''}<input id="aPass" type="password" autocomplete="${mode === 'up' ? 'new-password' : 'current-password'}" minlength="8" required></label>
       ${msg ? `<div class="msg ${cls}">${esc(msg)}</div>` : ''}
       <button class="btn primary" type="submit">${mode === 'up' ? 'Зарегистрироваться' : 'Войти'}</button>
-      <div class="row"><button type="button" class="link-btn" id="aReset">Забыли пароль?</button><button type="button" class="link-btn" id="aGuest">Продолжить без аккаунта</button></div>
-    </form></div>`;
-    r.querySelectorAll('.tabs button').forEach((b) => (b.onclick = () => { mode = b.dataset.m; draw(); }));
+      <div class="row"><button type="button" class="link-btn" id="aReset">Забыли пароль?</button><button type="button" class="link-btn" id="aGuest">Продолжить без аккаунта</button></div>`);
+    document.querySelectorAll('.auth .tabs button').forEach((b) => (b.onclick = () => { mode = b.dataset.m; draw(); }));
     $('#aGuest').onclick = () => { ls.set('pb-guest', true); Store.detach(); showApp(); route(); };
     $('#aReset').onclick = async () => {
       const em = $('#aEmail').value.trim(); if (!em) return draw('Введите почту, и мы пришлём ссылку для сброса пароля.', 'bad');
-      try { await FB.auth.sendPasswordResetEmail(em); draw('Письмо со ссылкой для сброса пароля отправлено на ' + em + '.', 'ok'); }
-      catch (e) { draw(AUTH_ERR[e.code] || e.message, 'bad'); }
+      try { await AW.account.createRecovery({ email: em, url: location.origin + location.pathname }); draw('Письмо со ссылкой для сброса пароля отправлено на ' + em + '. Проверьте и папку «Спам».', 'ok'); }
+      catch (e) { draw(authMsg(e), 'bad'); }
     };
     $('#authForm').onsubmit = async (e) => {
       e.preventDefault();
       const em = $('#aEmail').value.trim(), pw = $('#aPass').value;
+      const btn = document.querySelector('#authForm button[type=submit]'); btn.disabled = true;
       try {
         if (mode === 'up') {
-          const nm = $('#aName').value.trim(); if (!nm) return draw('Введите имя для рейтинга.', 'bad');
-          const cr = await FB.auth.createUserWithEmailAndPassword(em, pw);
-          await cr.user.updateProfile({ displayName: nm });
-          await Store.attach(cr.user, FB.fs); showApp(); route();
-        } else await FB.auth.signInWithEmailAndPassword(em, pw);
-      } catch (err) { draw(AUTH_ERR[err.code] || err.message, 'bad'); }
+          const nm = $('#aName').value.trim(); if (!nm) { btn.disabled = false; return draw('Введите имя для рейтинга.', 'bad'); }
+          if (pw.length < 8) { btn.disabled = false; return draw('Пароль должен быть не короче 8 символов.', 'bad'); }
+          await AW.account.create({ userId: window.Appwrite.ID.unique(), email: em, password: pw, name: nm });
+        }
+        await AW.account.createEmailPasswordSession({ email: em, password: pw });
+        ls.set('pb-guest', false);
+        await refreshSession();
+      } catch (err) { draw(authMsg(err), 'bad'); }
+    };
+  };
+  draw();
+}
+function showReset(userId, secret) {
+  const draw = (msg, cls) => {
+    authShell(`<p>Придумайте новый пароль (минимум 8 символов).</p>
+      <label>Новый пароль<input id="aPass" type="password" autocomplete="new-password" minlength="8" required></label>
+      ${msg ? `<div class="msg ${cls}">${esc(msg)}</div>` : ''}
+      <button class="btn primary" type="submit">Сохранить пароль</button>`);
+    $('#authForm').onsubmit = async (e) => {
+      e.preventDefault();
+      try {
+        await AW.account.updateRecovery({ userId, secret, password: $('#aPass').value });
+        history.replaceState(null, '', location.pathname);
+        Store.detach(); showAuth();
+        toast('Пароль изменён. Войдите с новым паролем.');
+      } catch (err) { draw(authMsg(err), 'bad'); }
     };
   };
   draw();
@@ -655,7 +713,7 @@ function viewHome() {
     <p class="lead">Тренажёр для подготовки к работе: теория и задачи с проверкой прямо в браузере. SQL выполняется в SQLite, Python — в настоящем интерпретаторе с pandas, SciPy, statsmodels, scikit-learn и matplotlib. Выберите трек — общие модули (Python, SQL, статистика) засчитываются во всех.</p></section>
     <div class="tracks">${TR.map((t) => { const s = solvedIn(t.tasks); return `<a class="track-card" href="#track-${t.id}"><span class="tk">Трек</span><b>${esc(t.title)}</b><p>${esc(t.short)}</p><div class="meta">${plural(t.mods.length, PM)} · ${plural(t.tasks.length, PT)} · решено ${s}</div><div class="mini"><i style="width:${t.tasks.length ? (100 * s) / t.tasks.length : 0}%"></i></div></a>`; }).join('')}</div>
     <div class="md">${mdRender(md`
-> **Как работать.** ${Store.mode === 'firebase' ? 'Вы вошли в аккаунт: решённые задачи сохраняются в облаке и видны с любого устройства, черновики кода хранятся в этом браузере.' : 'Сейчас прогресс хранится только в этом браузере.'} Первый запуск Python загружает интерпретатор (≈14 МБ), библиотеки подгружаются при первой задаче, где нужны.
+> **Как работать.** ${Store.mode === 'cloud' ?'Вы вошли в аккаунт: решённые задачи сохраняются в облаке и видны с любого устройства, черновики кода хранятся в этом браузере.' : 'Сейчас прогресс хранится только в этом браузере.'} Первый запуск Python загружает интерпретатор (≈14 МБ), библиотеки подгружаются при первой задаче, где нужны.
 `)}</div>`;
 }
 function viewTrack(t) {
@@ -692,14 +750,15 @@ function viewData() {
 }
 async function viewRating() {
   $('#view').innerHTML = `<div class="crumb">Сообщество</div><h1>Рейтинг</h1><div id="rt" class="loading-box">Загружаю…</div>`;
-  if (!FB || Store.mode !== 'firebase') { $('#rt').outerHTML = `<div class="md">${mdRender(FB ? 'Войдите в аккаунт, чтобы попасть в рейтинг и видеть прогресс друзей.' : 'Рейтинг появится, когда на сайте будет включён вход через Firebase (см. SETUP.md).')}</div>`; return; }
+  if (!AW || Store.mode !== 'cloud') { $('#rt').outerHTML = `<div class="md">${mdRender(AW ? 'Войдите в аккаунт, чтобы попасть в рейтинг и видеть прогресс друзей.' : 'Рейтинг появится, когда на сайте будет включён вход по почте (см. SETUP.md).')}</div>`; return; }
   try {
-    const snap = await FB.fs.collection('users').orderBy('count', 'desc').limit(100).get();
-    const rows = snap.docs.map((d, i) => ({ i: i + 1, id: d.id, name: d.data().name || 'Без имени', count: d.data().count || 0 }));
+    const { Query } = window.Appwrite;
+    const res = await AW.db.listRows({ databaseId: AW.cfg.databaseId, tableId: AW.cfg.tableId, queries: [Query.select(['$id', 'name', 'count']), Query.limit(200)] });
+    const rows = res.rows.map((d) => ({ id: d.$id, name: d.name || 'Без имени', count: d.count || 0 })).sort((a, b) => b.count - a.count);
     const box = document.createElement('div'); box.className = 'rating';
-    rows.forEach((r) => { const el = document.createElement('div'); if (r.id === Store.uid) el.className = 'me'; el.innerHTML = `<span>${r.i}</span><span></span><span style="text-align:right">${r.count} задач</span>`; el.children[1].textContent = r.name; box.appendChild(el); });
+    rows.forEach((r, i) => { const el = document.createElement('div'); if (r.id === Store.uid) el.className = 'me'; el.innerHTML = `<span>${i + 1}</span><span></span><span style="text-align:right">${plural(r.count, PT)}</span>`; el.children[1].textContent = r.name; box.appendChild(el); });
     $('#rt').replaceWith(box);
-  } catch (e) { $('#rt').textContent = 'Не удалось загрузить рейтинг: ' + (e.message || e); }
+  } catch (e) { $('#rt').textContent = 'Не удалось загрузить рейтинг: ' + authMsg(e); }
 }
 async function viewSelftest(filter) {
   $('#view').innerHTML = '<h1>Самопроверка эталонов</h1><p id="st-prog"></p><div id="st"></div>';
@@ -734,8 +793,8 @@ $('#menuBtn').addEventListener('click', () => $('#side').classList.toggle('open'
 window.addEventListener('hashchange', route);
 window.__pb = { TASKS, LESSONS, runPython, getDB, runSQL };
 
-if (window.FIREBASE_CONFIG) {
+if (window.APPWRITE_CONFIG && window.APPWRITE_CONFIG.projectId) {
   $('#view').innerHTML = '<div class="loading-box">Подключаюсь к аккаунту…</div>';
-  initFirebase().catch((e) => { toast('Вход недоступен: ' + (e.message || e) + '. Прогресс сохранится в браузере.'); showApp(); route(); });
+  initCloud().catch((e) => { toast('Вход недоступен: ' + authMsg(e) + '. Прогресс сохранится в браузере.'); showApp(); route(); });
 } else { renderUserChip(); route(); }
 })();
